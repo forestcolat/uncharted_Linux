@@ -223,7 +223,15 @@ def main():
     # accurate GPU memory (BB_GPU_MERGE=0) unless the player chose otherwise. Uncharted 3 runs the
     # same engine and showed the same floating NPCs (Linux fork), so it does too.
     player_merge = env.get('BB_GPU_MERGE')
+    # The read-back wait off the GPU thread (BB_SIDE_SPLIT, buffer_cache.cpp) lets Uncharted 2's
+    # convoy read vehicle physics before it lands (vehicles fly off); Uncharted 2 keeps the wait.
+    player_split = env.get('BB_SIDE_SPLIT')
     while True:
+        if player_split is None:
+            if exe == EXECUTABLES['u2']:
+                env['BB_SIDE_SPLIT'] = '0'
+            else:
+                env.pop('BB_SIDE_SPLIT', None)
         if player_merge is None:
             if exe in (EXECUTABLES['u2'], EXECUTABLES['u3']):
                 env['BB_GPU_MERGE'] = '0'
