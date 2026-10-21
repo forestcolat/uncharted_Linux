@@ -61,30 +61,68 @@ std::optional<u32> FindMemoryType(const vk::PhysicalDeviceMemoryProperties& prop
 
 struct BufferCache::SideQueue {
     static constexpr u64 StagingSize = 4_MB;
+    static constexpr u32 NumSlots = 4;
+
+    /// Linux fork: one download in flight each (BB_SIDE_SPLIT: the faulting guest thread waits
+    /// for its slot's fence while the GPU thread goes on).
+    struct Slot {
+        Slot(const Vulkan::Instance& instance, vk::Device device)
+            : staging{instance, 0, StagingSize, MemoryType::HostCached, "Side queue download"} {
+            pool = Vulkan::Check(device.createCommandPoolUnique({
+                .flags = vk::CommandPoolCreateFlagBits::eTransient,
+                .queueFamilyIndex = instance.GetSideQueueFamilyIndex(),
+            }));
+            cmdbuf = Vulkan::Check(device.allocateCommandBuffers({
+                                       .commandPool = *pool,
+                                       .level = vk::CommandBufferLevel::ePrimary,
+                                       .commandBufferCount = 1,
+                                   }))
+                         .front();
+            fence = Vulkan::Check(device.createFenceUnique({}));
+        }
+        Buffer staging;
+        vk::UniqueCommandPool pool;
+        vk::CommandBuffer cmdbuf;
+        vk::UniqueFence fence;
+        std::atomic<bool> busy{false};
+    };
 
     SideQueue(const Vulkan::Instance& instance, vk::Queue queue_)
-        : device{instance.GetDevice()}, queue{queue_},
-          staging{instance, 0, StagingSize, MemoryType::HostCached, "Side queue download"} {
-        pool = Vulkan::Check(device.createCommandPoolUnique({
-            .flags = vk::CommandPoolCreateFlagBits::eTransient,
-            .queueFamilyIndex = instance.GetSideQueueFamilyIndex(),
-        }));
-        cmdbuf = Vulkan::Check(device.allocateCommandBuffers({
-                                   .commandPool = *pool,
-                                   .level = vk::CommandBufferLevel::ePrimary,
-                                   .commandBufferCount = 1,
-                               }))
-                     .front();
-        fence = Vulkan::Check(device.createFenceUnique({}));
+        : device{instance.GetDevice()}, queue{queue_} {
+        for (u32 i = 0; i < NumSlots; ++i) {
+            slots.emplace_back(instance, device);
+        }
+    }
+
+    /// A free slot, or null when all are in flight.
+    Slot* Acquire() {
+        for (auto& slot : slots) {
+            bool expected = false;
+            if (slot.busy.compare_exchange_strong(expected, true, std::memory_order_acquire)) {
+                return &slot;
+            }
+        }
+        return nullptr;
     }
 
     vk::Device device;
     vk::Queue queue;
-    Buffer staging;
-    vk::UniqueCommandPool pool;
-    vk::CommandBuffer cmdbuf;
-    vk::UniqueFence fence;
-    std::mutex mutex;
+    std::deque<Slot> slots;
+    std::mutex submit_mutex; ///< vkQueueSubmit on the shared side queue
+};
+
+/// Linux fork: a side download submitted by the GPU thread and waited for by the faulting
+/// guest thread (BB_SIDE_SPLIT).
+struct BufferCache::SidePending {
+    SideQueue::Slot* slot{};
+    const Buffer* arena{};
+    boost::container::small_vector<VAddr, 16> pages;
+    boost::container::small_vector<u64, 16> page_ticks;
+    struct Copy {
+        vk::BufferCopy copy;
+        u32 page_index;
+    };
+    boost::container::small_vector<Copy, 16> copies;
 };
 
 BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
@@ -244,13 +282,17 @@ bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
             total += end - start;
         });
     }
-    auto& side = *side_queue;
     if (total > SideQueue::StagingSize) {
         return false;
     }
+    SideQueue::Slot* slot = total != 0 ? side_queue->Acquire() : nullptr;
+    if (total != 0 && !slot) {
+        return false;
+    }
     if (total != 0) {
-        std::scoped_lock lk{side.mutex};
-        Vulkan::Check(side.device.resetCommandPool(*side.pool));
+        auto& side = *slot;
+        const vk::Device device = side_queue->device;
+        Vulkan::Check(device.resetCommandPool(*side.pool));
         Vulkan::Check(side.cmdbuf.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}));
         side.cmdbuf.copyBuffer(arena->Handle(), side.staging.Handle(), copies);
         const vk::MemoryBarrier2 to_host = {
@@ -277,14 +319,18 @@ bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
             .commandBufferCount = 1,
             .pCommandBuffers = &side.cmdbuf,
         };
-        Vulkan::Check(side.queue.submit(submit, *side.fence));
-        Vulkan::Check(side.device.waitForFences(*side.fence, true, UINT64_MAX));
-        Vulkan::Check(side.device.resetFences(*side.fence));
+        {
+            std::scoped_lock lk{side_queue->submit_mutex};
+            Vulkan::Check(side_queue->queue.submit(submit, *side.fence));
+        }
+        Vulkan::Check(device.waitForFences(*side.fence, true, UINT64_MAX));
+        Vulkan::Check(device.resetFences(*side.fence));
         side.staging.Invalidate(0, total);
         for (const auto& copy : copies) {
             memory->TryWriteBacking(std::bit_cast<u8*>(arena->cpu_addr + copy.srcOffset),
                                     side.staging.mapped_data.data() + copy.dstOffset, copy.size);
         }
+        side.busy.store(false, std::memory_order_release);
     }
     for (const VAddr at : pages) {
         gpu_modified_ranges.Subtract(at, TRACKER_BYTES_PER_PAGE);
@@ -363,6 +409,144 @@ u32 LastGpuUse(VAddr address, u64 size) {
 }
 } // namespace
 
+bool BufferCache::BeginSideDownload(VAddr page, u64 length, SidePending& out) {
+    if (!side_queue) {
+        return false;
+    }
+    constexpr u64 Window = 64_KB;
+    const u64 first_block = page >> block_shift;
+    const u64 last_block = (page + length - 1) >> block_shift;
+    const Buffer* arena = GetArena(first_block, last_block);
+    const VAddr window_start = std::max(Common::AlignDown(page, Window), arena->cpu_addr);
+    const VAddr window_end = std::min(
+        std::max(Common::AlignDown(page, Window) + Window, page + length),
+        arena->cpu_addr + arena->size_bytes);
+    const u64 recording = scheduler.CurrentTick();
+    u64 write_tick = 0;
+    {
+        std::scoped_lock lk{shadow_mutex};
+        for (VAddr at = window_start; at < window_end; at += TRACKER_BYTES_PER_PAGE) {
+            const bool faulting = at >= page && at < page + length;
+            if (!memory_tracker->IsRegionGpuModified(at, TRACKER_BYTES_PER_PAGE)) {
+                continue;
+            }
+            const u64 tick = memory_tracker->LatestGpuWriteTick(at, TRACKER_BYTES_PER_PAGE);
+            // Only work already submitted: the side queue waits for its tick on the GPU (a tick
+            // still being recorded would need a flush from here).
+            const bool usable = !shadows.contains(at) && tick < recording &&
+                                (faulting || !memory_tracker->IsRegionCpuModified(
+                                                 at, TRACKER_BYTES_PER_PAGE));
+            if (!usable) {
+                if (faulting) {
+                    return false;
+                }
+                continue;
+            }
+            out.pages.push_back(at);
+            out.page_ticks.push_back(tick);
+            write_tick = std::max(write_tick, tick);
+        }
+    }
+    u64 total = 0;
+    for (u32 index = 0; index < out.pages.size(); ++index) {
+        gpu_modified_ranges.ForEachInRange(out.pages[index], TRACKER_BYTES_PER_PAGE,
+                                           [&](VAddr start, VAddr end) {
+            total = Common::AlignUp(total, 64);
+            out.copies.push_back({vk::BufferCopy{
+                                      .srcOffset = start - arena->cpu_addr,
+                                      .dstOffset = total,
+                                      .size = end - start,
+                                  },
+                                  index});
+            total += end - start;
+        });
+    }
+    if (total == 0 || total > SideQueue::StagingSize) {
+        return false;
+    }
+    SideQueue::Slot* slot = side_queue->Acquire();
+    if (!slot) {
+        return false;
+    }
+    const vk::Device device = side_queue->device;
+    Vulkan::Check(device.resetCommandPool(*slot->pool));
+    Vulkan::Check(slot->cmdbuf.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}));
+    boost::container::small_vector<vk::BufferCopy, 16> copies;
+    for (const auto& copy : out.copies) {
+        copies.push_back(copy.copy);
+    }
+    slot->cmdbuf.copyBuffer(arena->Handle(), slot->staging.Handle(), copies);
+    const vk::MemoryBarrier2 to_host = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+        .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+    };
+    slot->cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &to_host});
+    Vulkan::Check(slot->cmdbuf.end());
+    // The side queue waits for the writing work on the GPU: nobody waits on the CPU here.
+    const vk::Semaphore timeline = scheduler.GetWorkSemaphore()->Handle();
+    const vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eTransfer;
+    const vk::TimelineSemaphoreSubmitInfo timeline_info = {
+        .waitSemaphoreValueCount = 1,
+        .pWaitSemaphoreValues = &write_tick,
+    };
+    const vk::SubmitInfo submit = {
+        .pNext = &timeline_info,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &timeline,
+        .pWaitDstStageMask = &wait_stage,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &slot->cmdbuf,
+    };
+    {
+        std::scoped_lock lk{side_queue->submit_mutex};
+        Vulkan::Check(side_queue->queue.submit(submit, *slot->fence));
+    }
+    out.slot = slot;
+    out.arena = arena;
+    return true;
+}
+
+void BufferCache::WaitSideDownload(SidePending& pending) {
+    const vk::Device device = side_queue->device;
+    Vulkan::Check(device.waitForFences(*pending.slot->fence, true, UINT64_MAX));
+}
+
+bool BufferCache::FinishSideDownload(SidePending& pending, VAddr page, u64 length) {
+    auto& slot = *pending.slot;
+    Vulkan::Check(side_queue->device.resetFences(*slot.fence));
+    slot.staging.Invalidate(0, SideQueue::StagingSize);
+    bool faulting_ok = true;
+    boost::container::small_vector<bool, 16> fresh;
+    for (u32 index = 0; index < pending.pages.size(); ++index) {
+        const VAddr at = pending.pages[index];
+        // The guard: GPU work that wrote the page again since the copy makes the copy stale.
+        const bool same = memory_tracker->IsRegionGpuModified(at, TRACKER_BYTES_PER_PAGE) &&
+                          memory_tracker->LatestGpuWriteTick(at, TRACKER_BYTES_PER_PAGE) ==
+                              pending.page_ticks[index];
+        fresh.push_back(same);
+        if (!same && at >= page && at < page + length) {
+            faulting_ok = false;
+        }
+    }
+    for (const auto& copy : pending.copies) {
+        if (fresh[copy.page_index]) {
+            memory->TryWriteBacking(
+                std::bit_cast<u8*>(pending.arena->cpu_addr + copy.copy.srcOffset),
+                slot.staging.mapped_data.data() + copy.copy.dstOffset, copy.copy.size);
+        }
+    }
+    for (u32 index = 0; index < pending.pages.size(); ++index) {
+        if (fresh[index]) {
+            gpu_modified_ranges.Subtract(pending.pages[index], TRACKER_BYTES_PER_PAGE);
+            memory_tracker->UnmarkRegionAsGpuModified(pending.pages[index], TRACKER_BYTES_PER_PAGE);
+        }
+    }
+    slot.busy.store(false, std::memory_order_release);
+    return faulting_ok;
+}
+
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
         // bbport: a guest write to a page holding GPU data read that data back first, which
@@ -419,9 +603,39 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
         };
         if (assume_locks) {
             resolve();
-        } else {
-            liverpool->SendCommand<true>(std::move(resolve));
+            return;
         }
+        // Linux fork: without merging, the side download's wait for the GPU happens on this
+        // (faulting guest) thread instead of the GPU thread, which goes on feeding the GPU
+        // (BB_SIDE_SPLIT=0: the GPU thread waits, as before).
+        static const bool split = [] {
+            const char* env = std::getenv("BB_SIDE_SPLIT");
+            return !merge && !(env && env[0] == '0');
+        }();
+        if (!split) {
+            liverpool->SendCommand<true>(std::move(resolve));
+            return;
+        }
+        SidePending pending;
+        bool started = false;
+        liverpool->SendCommand<true>([&] {
+            started = BeginSideDownload(page, length, pending);
+            if (!started) {
+                resolve();
+            }
+        });
+        if (!started) {
+            return;
+        }
+        WaitSideDownload(pending);
+        liverpool->SendCommand<true>([&] {
+            if (FinishSideDownload(pending, page, length)) {
+                memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+                BbStats::gpu_side_downloads.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                resolve(); // the GPU wrote a faulting page again since: the old way
+            }
+        });
     });
 }
 

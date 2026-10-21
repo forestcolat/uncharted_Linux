@@ -216,6 +216,14 @@ private:
     struct SideQueue;
     std::unique_ptr<SideQueue> side_queue;
     bool DownloadOnSideQueue(VAddr page, u64 length);
+    /// Linux fork (BB_SIDE_SPLIT): DownloadOnSideQueue without waiting on the GPU thread.
+    /// Begin (GPU thread) submits the copy; the faulting guest thread waits for the slot's fence;
+    /// Finish (GPU thread) writes the pages whose GPU data did not change since, and returns false
+    /// when a faulting page did (the caller resolves it the old way).
+    struct SidePending;
+    bool BeginSideDownload(VAddr page, u64 length, SidePending& out);
+    void WaitSideDownload(SidePending& pending);
+    bool FinishSideDownload(SidePending& pending, VAddr page, u64 length);
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
