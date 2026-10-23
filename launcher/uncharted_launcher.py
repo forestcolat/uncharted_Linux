@@ -131,7 +131,8 @@ FRAME_GENERATION = [('off', 'Off'), ('fsr3', 'AMD FSR 3 Frame Generation (any GP
                     ('dlss', 'NVIDIA DLSS Frame Generation (GeForce RTX 40/50)')]
 BUTTON_PROMPTS = [('auto', 'Automatic (follows the device you used last)'),
                   ('keyboard', 'Keyboard and mouse keys'), ('xbox', 'Xbox buttons'),
-                  ('0', "PlayStation buttons (the game's own)")]
+                  ('0', "PlayStation buttons (the game's own)"),
+                  ('steamdeck', 'Steam Deck / Steam Controller buttons')]
 FRAME_GEN_MULTIPLIERS = [('2', '2× (one generated frame)'), ('3', '3× (DLSS on GeForce RTX 50)'),
                          ('4', '4× (DLSS on GeForce RTX 50)')]
 # Controls (input.ini, read by the game: src/runtime_pad.c). Actions with their PS4 names, the
@@ -1478,7 +1479,8 @@ class Launcher:
         self.row(f, _('Show in the game'), self.choice(f, 'button_prompts', BUTTON_PROMPTS, 40),
                  _('The pictures of buttons in menus and hints. Automatic shows your keys while you use '
                    'the keyboard or mouse, Xbox buttons after an Xbox (or other) controller, and the '
-                   'PlayStation buttons after a PlayStation controller.'))
+                   'PlayStation buttons after a PlayStation controller. Steam Deck buttons are the Xbox ones '
+                   'with A, B, X and Y in black and white; Steam Deck mode uses them in place of the Xbox ones.'))
 
         self.section(f, _('Keyboard and mouse buttons'))
         self.note(f, _('Click a box, then press a key or a mouse button (the wheel counts too). '
