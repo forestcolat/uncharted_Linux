@@ -463,7 +463,10 @@ static ABI int32_t direct_allocate(int64_t low, int64_t high, uint64_t size,
      * that search so the larger render target heaps fit. */
     if ((uint64_t)high >= UINT64_C(5056) * 1024 * 1024 && (uint64_t)high < POOL_SIZE) high = (int64_t)POOL_SIZE;
     uint64_t end = (uint64_t)high < POOL_SIZE ? (uint64_t)high : POOL_SIZE;
-    if ((uint64_t)low >= end || size > end - (uint64_t)low) return NO_SPACE;
+    if ((uint64_t)low >= end || size > end - (uint64_t)low) {
+        printf("Runtime: direct allocation of %" PRIu64 " bytes in [%#" PRIx64 ", %#" PRIx64 ") refused: no space (pool %" PRIu64 " bytes)\n",size,(uint64_t)low,(uint64_t)high,(uint64_t)POOL_SIZE);
+        return NO_SPACE;
+    }
     write_lock();
     if (pool()) { write_unlock(); return NO_MEMORY; }
     uint64_t start = align_up((uint64_t)low, alignment);

@@ -1113,6 +1113,9 @@ int main(int argc, char **argv) {
     mallopt(M_MMAP_THRESHOLD,32*1024*1024);
 #endif
     if (argc == 2 && !strcmp(argv[1], "--vulkan-only")) return vulkan_smoke();
+    if (argc == 2 && !strcmp(argv[1], "--controller-info")) return runtime_pad_tool(0,100);
+    if (argc == 3 && !strcmp(argv[1], "--controller-test"))
+        return runtime_pad_tool(1,atoi(argv[2]));
     check_cpu();
 #ifdef _WIN32
     /* The PS4 user range must stay free of host allocations (GPU driver, heaps), and the guest
@@ -1122,7 +1125,8 @@ int main(int argc, char **argv) {
 #endif
     int cpu_only = 0, strict_imports = 0, list_missing = 0;
     unsigned timeout_seconds = 10;
-    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL, *guest_argv_file=NULL;
+    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_files[4]={0}, *guest_argv_file=NULL, *trophy_dir=NULL;
+    int n_patch_files=0;
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--cpu-only")) cpu_only = 1;
         else if (!strcmp(argv[i], "--strict-imports")) strict_imports = 1;
@@ -1130,13 +1134,17 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--content-profile") && i+1<argc) content_profile=argv[++i];
         else if (!strcmp(argv[i], "--app0") && i+1<argc) app0=argv[++i];
         else if (!strcmp(argv[i], "--user") && i+1<argc) user_dir=argv[++i];
-        else if (!strcmp(argv[i], "--patches") && i+1<argc) patch_file=argv[++i];
+        else if (!strcmp(argv[i], "--patches") && i+1<argc) { /* Linux fork: cheats and the Deck's 720p mode */
+            if (n_patch_files==4) fail("too many --patches");
+            patch_files[n_patch_files++]=argv[++i];
+        }
         else if (!strcmp(argv[i], "--guest-argv") && i+1<argc) guest_argv_file=argv[++i];
+        else if (!strcmp(argv[i], "--trophies") && i+1<argc) trophy_dir=argv[++i];
         else if (!strcmp(argv[i], "--timeout") && i+1<argc) timeout_seconds=(unsigned)strtoul(argv[++i],NULL,10);
         else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
     }
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--list-missing] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--guest-argv file] [--timeout seconds] | --vulkan-only\n", argv[0]);
+        fprintf(stderr, "Usage: %s boot.bin [options] | --vulkan-only | --controller-info | --controller-test 0..100\n", argv[0]);
         return 1;
     }
     if (content_profile) {
@@ -1164,6 +1172,7 @@ int main(int argc, char **argv) {
         sfo_value(sfo,"APP_VER",version,sizeof(version),NULL);
         bbnet_configure(app0,serial,title,version);
     }
+    if (trophy_dir) runtime_trophy_configure(trophy_dir);
     bbgpu_register_kernel();
 #ifdef _WIN32
     SYSTEM_INFO system_info; GetSystemInfo(&system_info); page_size = system_info.dwPageSize;
@@ -1348,7 +1357,7 @@ int main(int argc, char **argv) {
         }
         memcpy(image + relocs[i].target, &value, 8);
     }
-    if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
+    for (int p=0;p<n_patch_files;++p) apply_patches(patch_files[p], segments, ns, relocs, nr);
     install_guest_hooks(segments, ns);
     {
         uint64_t image_end=0;
@@ -1357,6 +1366,7 @@ int main(int argc, char **argv) {
         patch_collection_skip(image_end);
         patch_eop_tick_wait(image_end);
         patch_job_sleep(image_end);
+        runtime_display_patch(image, image_end);
     }
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
@@ -1415,7 +1425,10 @@ int main(int argc, char **argv) {
     if (getenv("BB_WATCH")) CloseHandle(CreateThread(NULL,0,watch_thread,getenv("BB_WATCH"),0,NULL));
 #endif
     /* argv: the executable and, after sceSystemServiceLoadExec, the arguments it was given
-     * (--guest-argv: one per line, the guest path first). */
+     * (--guest-argv: one per line, the guest path first). The caller's list is argv as is, its
+     * first element argv[0] (execve): the collection menu passes "eboot.bin"
+     * "ispartofuccollection", and U2 took an "eboot.bin" in argv[1] for an option and stayed
+     * on a grey screen. The path is argv[0] only when no arguments were given. */
     struct { uint64_t argc; const char *argv[34]; } params = {1, {"/app0/eboot.bin", NULL}};
     if (guest_argv_file) {
         FILE *list=fopen(guest_argv_file,"rb");
@@ -1426,7 +1439,10 @@ int main(int argc, char **argv) {
             params.argv[n]=lines[n]; ++n;
         }
         if (list) fclose(list);
-        if (n) { params.argc=n; params.argv[n]=NULL; }
+        if (n>1) {
+            for (uint64_t i=1;i<n;++i) params.argv[i-1]=lines[i];
+            params.argc=n-1; params.argv[n-1]=NULL;
+        } else if (n) { params.argc=1; params.argv[1]=NULL; }
         printf("Guest argv: %s (+%" PRIu64 " arguments)\n",params.argv[0],params.argc-1);
     }
 #ifdef _WIN32

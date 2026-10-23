@@ -478,6 +478,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 #ifdef _WIN32 // Linux fork: these diagnostics use Windows calls
     // bbport: BB_SUBMIT_THREADS=1 names each thread that submits through this scheduler (once).
     static const bool submit_threads = std::getenv("BB_SUBMIT_THREADS") != nullptr;
+#ifdef _WIN32
     if (submit_threads) {
         static std::mutex seen_mutex;
         static std::vector<std::pair<const Scheduler*, u32>> seen;

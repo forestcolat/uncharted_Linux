@@ -15,6 +15,8 @@ typedef bb_jmp_buf sigjmp_buf;
 extern __thread sigjmp_buf *runtime_fault_recover;
 /* Restarts the game (in-game settings menu, render resolution change). */
 void runtime_restart(void);
+/* BB_GAME_RES: rewrites the display configuration the game initializes (runtime_display.c). */
+void runtime_display_patch(unsigned char *image, uint64_t image_size);
 #define ABI __attribute__((sysv_abi))
 typedef void (ABI *GuestCallback)(void);
 void runtime_start(uint64_t capabilities);
@@ -83,10 +85,14 @@ uintptr_t runtime_audio_resolve(const char *name);
 void runtime_audio_report(void);
 uintptr_t runtime_pad_resolve(const char *name);
 void runtime_pad_report(void);
+int runtime_pad_tool(int test, int strength);
 uintptr_t runtime_rtc_resolve(const char *name);
 const char *runtime_file_user_dir(void);
 void runtime_savedata_configure(const char *title);
 uintptr_t runtime_savedata_resolve(const char *name);
+/* Trophies (runtime_trophy.c): the folder run.py prepared for the running game (scripts/trophies.py). */
+void runtime_trophy_configure(const char *dir);
+uintptr_t runtime_trophy_resolve(const char *name);
 void runtime_savedata_report(void);
 int runtime_savedata_pick(int32_t user, const char *title, const char (*names)[32], uint32_t count,
                           int which, const char *focus, char out[32], void *param_out);

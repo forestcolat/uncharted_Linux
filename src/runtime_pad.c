@@ -10,6 +10,7 @@
  *       lefttrigger righttrigger leftstick rightstick back start dpup dpdown dpleft dpright
  *       touchpad misc1 paddle1..paddle4) or "none", for the button actions above.
  *   mouse_look=1  mouse_sensitivity=1.0  mouse_invert_y=0  pad_invert_y=0
+ *   pad_vibration=1  pad_vibration_strength=100
  *
  * Defaults (no file): WASD move, mouse look, left button R2 (fire), right button L2 (aim),
  * Space Cross, C Circle, F Square, E Triangle, Q L1, G R1, Left Shift L3, V R3, Escape/Enter
@@ -102,8 +103,11 @@ static SDL_Gamepad *current_gamepad(void) {
 #define MOUSE_DEGREES_PER_PIXEL 0.15f
 
 /* ---- bindings (input.ini) ---------------------------------------------------------------- */
-enum { BIND_KEY=1, BIND_MOUSE, BIND_WHEEL };
-typedef struct { uint8_t kind; int16_t code; } Bind;
+/* BIND_KEY: a physical key (SDL scancode, US position). BIND_LAYOUT: a character key the player
+ * chose, found in the current keyboard layout (SDL keycode), so "Z" is the key labelled Z on an
+ * AZERTY keyboard too. The default letters stay positions: WASD is ZQSD on AZERTY. */
+enum { BIND_KEY=1, BIND_MOUSE, BIND_WHEEL, BIND_LAYOUT };
+typedef struct { uint8_t kind; int32_t code; } Bind;
 typedef struct { const char *name; uint32_t ps; const char *keys; const char *pad; } Action;
 enum { A_LS_UP=16, A_LS_DOWN, A_LS_LEFT, A_LS_RIGHT, A_RS_UP, A_RS_DOWN, A_RS_LEFT, A_RS_RIGHT, ACTIONS };
 static const Action actions[ACTIONS]={
@@ -122,19 +126,34 @@ static const Action actions[ACTIONS]={
 static struct {
     Bind keys[ACTIONS][2];
     int pad[16];               /* SDL_GamepadButton, PAD_TRIGGER_*, or -1 */
-    int mouse_look, mouse_invert_y, pad_invert_y;
+    int mouse_look, mouse_invert_y, pad_invert_y, pad_vibration, pad_vibration_strength;
     float mouse_sensitivity;
 } input;
 
-static Bind parse_bind(const char *name) {
+/* Whether `name` is one of the keys in `defaults` ("Escape|Return"). */
+static int default_key(const char *name, const char *defaults) {
+    const size_t length=strlen(name);
+    for (const char *d=defaults; d && *d; ) {
+        const char *end=strchr(d,'|');
+        const size_t n=end ? (size_t)(end-d) : strlen(d);
+        if (n==length && !SDL_strncasecmp(d,name,n)) return 1;
+        d=end ? end+1 : NULL;
+    }
+    return 0;
+}
+static Bind parse_bind(const char *name, const char *defaults) {
     static const struct { const char *name; uint8_t kind; int16_t code; } mouse[]={
         {"Mouse Left",BIND_MOUSE,1}, {"Mouse Right",BIND_MOUSE,2}, {"Mouse Middle",BIND_MOUSE,4},
         {"Mouse 4",BIND_MOUSE,8}, {"Mouse 5",BIND_MOUSE,16}, {"Wheel Up",BIND_WHEEL,1}, {"Wheel Down",BIND_WHEEL,-1},
     };
     for (size_t i=0;i<sizeof(mouse)/sizeof(*mouse);++i)
         if (!SDL_strcasecmp(name,mouse[i].name)) return (Bind){mouse[i].kind,mouse[i].code};
+    if (name[0]>' ' && name[0]<127 && !name[1] && !default_key(name,defaults)) {
+        const SDL_Keycode key=SDL_GetKeyFromName(name);
+        if (key!=SDLK_UNKNOWN) return (Bind){BIND_LAYOUT,(int32_t)key};
+    }
     const SDL_Scancode code=SDL_GetScancodeFromName(name);
-    return code==SDL_SCANCODE_UNKNOWN ? (Bind){0,0} : (Bind){BIND_KEY,(int16_t)code};
+    return code==SDL_SCANCODE_UNKNOWN ? (Bind){0,0} : (Bind){BIND_KEY,(int32_t)code};
 }
 static void set_keys(int action, const char *value) {
     char text[128];
@@ -142,8 +161,8 @@ static void set_keys(int action, const char *value) {
     input.keys[action][0]=input.keys[action][1]=(Bind){0,0};
     char *second=strchr(text,'|');
     if (second) *second++=0;
-    if (*text) input.keys[action][0]=parse_bind(text);
-    if (second && *second) input.keys[action][1]=parse_bind(second);
+    if (*text) input.keys[action][0]=parse_bind(text,actions[action].keys);
+    if (second && *second) input.keys[action][1]=parse_bind(second,actions[action].keys);
 }
 static int parse_pad(const char *value) {
     if (!SDL_strcasecmp(value,"lefttrigger")) return PAD_TRIGGER_LEFT;
@@ -157,6 +176,7 @@ static void load_input(void) {
         if (a<16) input.pad[a]=parse_pad(actions[a].pad);
     }
     input.mouse_look=1; input.mouse_sensitivity=1.0f;
+    input.pad_vibration=1; input.pad_vibration_strength=100;
     const char *path=getenv("BB_INPUT_CONFIG");
     FILE *f=path && *path ? fopen(path,"r") : NULL;
     if (f) {
@@ -171,6 +191,8 @@ static void load_input(void) {
             else if (!strcmp(key,"mouse_sensitivity")) input.mouse_sensitivity=(float)atof(value);
             else if (!strcmp(key,"mouse_invert_y")) input.mouse_invert_y=atoi(value)!=0;
             else if (!strcmp(key,"pad_invert_y")) input.pad_invert_y=atoi(value)!=0;
+            else if (!strcmp(key,"pad_vibration")) input.pad_vibration=atoi(value)!=0;
+            else if (!strcmp(key,"pad_vibration_strength")) input.pad_vibration_strength=atoi(value);
             else for (int a=0;a<ACTIONS;++a) {
                 if (!strncmp(key,"key.",4) && !strcmp(key+4,actions[a].name)) set_keys(a,value);
                 else if (a<16 && !strncmp(key,"pad.",4) && !strcmp(key+4,actions[a].name)) input.pad[a]=parse_pad(value);
@@ -181,6 +203,8 @@ static void load_input(void) {
                input.mouse_look ? "on" : "off",input.mouse_sensitivity);
     }
     if (input.mouse_sensitivity<=0.0f) input.mouse_sensitivity=1.0f;
+    if (input.pad_vibration_strength<0) input.pad_vibration_strength=0;
+    if (input.pad_vibration_strength>100) input.pad_vibration_strength=100;
     bbgpu_mouse_configure(input.mouse_look);
 }
 
@@ -202,9 +226,24 @@ static uint8_t mouse_axis(float rate) {
 static int bind_down(const Bind *b, const bool *k, uint32_t mouse, uint64_t now) {
     switch (b->kind) {
     case BIND_KEY: return k && k[b->code];
+    case BIND_LAYOUT: {
+        const SDL_Scancode code=k ? SDL_GetScancodeFromKey((SDL_Keycode)b->code,NULL) : SDL_SCANCODE_UNKNOWN;
+        return code!=SDL_SCANCODE_UNKNOWN && k[code];
+    }
     case BIND_MOUSE: return (mouse & (uint32_t)b->code)!=0;
     case BIND_WHEEL: return now<wheel_until_us[b->code>0 ? 0 : 1];
     default: return 0;
+    }
+}
+/* Once the keyboard is up: where the layout put each character key the player chose. */
+static void log_layout_keys(void) {
+    for (int a=0;a<ACTIONS;++a) for (int i=0;i<2;++i) {
+        const Bind *b=&input.keys[a][i];
+        if (b->kind!=BIND_LAYOUT) continue;
+        const SDL_Scancode code=SDL_GetScancodeFromKey((SDL_Keycode)b->code,NULL);
+        printf("Runtime: key.%s %s: the key labelled so in this keyboard layout (US position %s)\n",
+               actions[a].name,SDL_GetKeyName((SDL_Keycode)b->code),
+               code==SDL_SCANCODE_UNKNOWN ? "none" : SDL_GetScancodeName(code));
     }
 }
 static int action_down(int a, const bool *k, uint32_t mouse, uint64_t now) {
@@ -720,6 +759,15 @@ const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count) {
     return guest_callbacks;
 }
 
+/* The button pictures for this controller: 1 PlayStation (DualShock, DualSense: the game's own),
+ * 2 Xbox (everything else; the buttons are named by position, so a Switch pad is shown as the
+ * Xbox layout). */
+static int prompts_pad_device(SDL_Gamepad *g) {
+    const SDL_GamepadType type=SDL_GetGamepadType(g);
+    if (type==SDL_GAMEPAD_TYPE_PS3 || type==SDL_GAMEPAD_TYPE_PS4 || type==SDL_GAMEPAD_TYPE_PS5) return 1;
+    return SDL_GetGamepadButtonLabel(g,SDL_GAMEPAD_BUTTON_SOUTH)==SDL_GAMEPAD_BUTTON_LABEL_CROSS ? 1 : 2;
+}
+
 static void sample_host(PadData *d) {
     memset(d,0,sizeof(*d));
     d->left_x=d->left_y=d->right_x=d->right_y=128;
@@ -745,6 +793,8 @@ static void sample_host(PadData *d) {
     if (wheel>0) wheel_until_us[0]=now+80000;
     if (wheel<0) wheel_until_us[1]=now+80000;
     const bool *k=SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
+    static int layout_logged;
+    if (k && !layout_logged) { layout_logged=1; log_layout_keys(); }
     if (g) {
         for (int a=0;a<16;++a) {
             const int b=input.pad[a];
@@ -773,6 +823,21 @@ static void sample_host(PadData *d) {
                         .y=touch_axis(y,942),.id=(uint8_t)finger};
                 }
             }
+        }
+    }
+    /* The device used last picks the button prompts: the game's PlayStation buttons or pictures
+     * of the bound keys (bbgpu_prompts_controller). A stick counts past half way, the mouse when
+     * it moves more than a few pixels. */
+    const int pad_used=g && (d->buttons || d->l2>60 || d->r2>60 || abs(d->left_x-128)>64 ||
+                             abs(d->left_y-128)>64 || abs(d->right_x-128)>64 || abs(d->right_y-128)>64);
+    int keys_used=mouse || wheel || (captured && SDL_fabsf(mdx)+SDL_fabsf(mdy)>3.0f);
+    for (int a=0;a<ACTIONS && !keys_used;++a) keys_used=action_down(a,k,mouse,now);
+    static int prompts_device=-1;
+    if (pad_used!=keys_used) {
+        const int device=pad_used ? prompts_pad_device(g) : 0;
+        if (device!=prompts_device) {
+            prompts_device=device;
+            bbgpu_prompts_controller(device);
         }
     }
     /* Keyboard and mouse, together with the controller. */
@@ -1038,8 +1103,13 @@ static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!param) return ERR_INVALID_ARG;
     pthread_mutex_lock(&lock);
-    SDL_Gamepad *g=current_gamepad();
-    if (g) SDL_RumbleGamepad(g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257),1000);
+    SDL_Gamepad *g=input.pad_vibration ? current_gamepad() : NULL;
+    if (g) {
+        const unsigned strength=(unsigned)input.pad_vibration_strength;
+        const uint16_t low=(uint16_t)((param[0]*257u*strength+50u)/100u);
+        const uint16_t high=(uint16_t)((param[1]*257u*strength+50u)/100u);
+        SDL_RumbleGamepad(g,low,high,1000);
+    }
     pthread_mutex_unlock(&lock);
     return 0;
 }
@@ -1075,3 +1145,39 @@ static const RuntimeExport exports[]={
 };
 uintptr_t runtime_pad_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
 void runtime_pad_report(void) { printf("Runtime: pad reads=%zu, gamepad=%s\n",reads,gamepad ? SDL_GetGamepadName(gamepad) : "none"); }
+
+/* A loader command used by the launcher before the game starts: no Vulkan or guest memory. */
+int runtime_pad_tool(int test, int strength) {
+    const int already_ready=SDL_WasInit(SDL_INIT_GAMEPAD)!=0;
+    if (!already_ready && !SDL_InitSubSystem(SDL_INIT_GAMEPAD)) {
+        fprintf(stderr,"Controller detection failed: %s\n",SDL_GetError());
+        return 1;
+    }
+    int count=0;
+    SDL_JoystickID *ids=SDL_GetGamepads(&count);
+    SDL_Gamepad *pad=ids && count>0 ? SDL_OpenGamepad(ids[0]) : NULL;
+    SDL_free(ids);
+    if (!pad) {
+        puts("connected=0\nrumble=0");
+        if (!already_ready) SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
+        return 0;
+    }
+    const char *name=SDL_GetGamepadName(pad);
+    const bool rumble=SDL_GetBooleanProperty(SDL_GetGamepadProperties(pad),
+                                             SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN,false);
+    puts("connected=1");
+    printf("name=%s\n",name ? name : "Game controller");
+    printf("rumble=%d\n",rumble ? 1 : 0);
+    if (test) {
+        if (strength<0) strength=0;
+        if (strength>100) strength=100;
+        const uint16_t amount=(uint16_t)((65535u*(unsigned)strength+50u)/100u);
+        const bool started=rumble && SDL_RumbleGamepad(pad,amount,amount,500);
+        if (started) SDL_Delay(500);
+        SDL_RumbleGamepad(pad,0,0,0);
+        printf("tested=%d\n",started ? 1 : 0);
+    }
+    SDL_CloseGamepad(pad);
+    if (!already_ready) SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
+    return 0;
+}
