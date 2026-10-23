@@ -427,9 +427,10 @@ private:
     Common::SlotVector<ImageView> slot_image_views;
     tsl::robin_map<u64, Sampler> samplers;
     std::unordered_set<ImageId> download_images;
-    std::unordered_set<ImageId> small_download_images; ///< bbport: ReadbackSmallTargets
     u64 total_used_memory = 0;
     u64 registered_image_bytes = 0; ///< bbport: guest bytes of registered images (diagnostics)
+    bool tight_budget = false;                  ///< bbport: card under ~5 GB
+    std::atomic<u64> pending_free_bytes{0};     ///< bbport: deleted, not yet destroyed
     u64 gc_evictions = 0, gc_downloads = 0, gc_dropped = 0; ///< bbport: pressure report
     u64 gc_kept = 0, gc_kept_bytes = 0; ///< bbport: old images the latest pass could not evict
     std::chrono::steady_clock::time_point gc_report_time{};
@@ -447,6 +448,11 @@ private:
     Common::LeastRecentlyUsedCache<ImageId, u64> lru_cache;
     Common::LeastRecentlyUsedCache<u64, u64> sampler_lru_cache;
     const bool readback_linear_images;
+    /// bbport: tiny render results (a few pixels) the game reads on the CPU, copied back to
+    /// guest memory without waiting (TinyReadback).
+    std::unordered_set<ImageId> tiny_download_images;
+    /// bbport: whether the image is such a result: at most 4x4 pixels, linear or 1x1.
+    [[nodiscard]] static bool TinyReadback(const Image& image);
     PageTable page_table;
     std::mutex mutex;
     /// gow3 (#138): under `mutex`. GPU-modified images hold the written data themselves.

@@ -41,7 +41,7 @@ CONFIG_FILE = CONFIG_DIR / 'settings.json'
 NAME = 'Uncharted'
 AUTHOR = 'SuperMedo'
 # This build; GitHub release tags are v<VERSION> (their digits are compared).
-VERSION = '0.3.6'
+VERSION = '0.3.7'
 RELEASES_API = 'https://api.github.com/repos/Supermedo/uncharted_pc/releases/latest'
 RELEASES_PAGE = 'https://github.com/Supermedo/uncharted_pc/releases/latest'
 if not WINDOWS:  # Linux fork: its own releases (the Linux builds), tagged v<upstream>-linux.<n>
@@ -73,7 +73,7 @@ PRESENT_MODES = [('Mailbox', 'Mailbox (low latency, no tearing)'), ('Fifo', 'FIF
                  ('FifoRelaxed', 'FIFO Relaxed'), ('Immediate', 'Immediate (tearing)')]
 # The display rate the games run at (BB_VBLANK_HZ): they time gameplay with the real clock, and
 # the prerecorded cutscenes keep 60 frames per second at every setting.
-FRAME_RATES = [('60', '60 FPS (as on PS4)'), ('120', '120 FPS'), ('144', '144 FPS (experimental)'),
+FRAME_RATES = [('30', '30 FPS'), ('60', '60 FPS (as on PS4)'), ('120', '120 FPS'), ('144', '144 FPS (experimental)'),
                ('165', '165 FPS (experimental)'), ('240', '240 FPS (experimental)')]
 # The games render 1920x1080; the window (or the screen in fullscreen) gets that image scaled
 # to its size: FSR 1 (EASU) or bilinear, then RCAS sharpening (BB_RCAS_ATTENUATION, lower
@@ -94,6 +94,7 @@ RENDER_RESOLUTIONS = [('1280x720', '1280 × 720'), ('1600x900', '1600 × 900'),
                       ('1920x1080', "1920 × 1080 (the games' own)"), ('2560x1440', '2560 × 1440'),
                       ('2880x1620', '2880 × 1620'), ('3200x1800', '3200 × 1800'),
                       ('3840x2160', '3840 × 2160 (4K; Drake\'s Fortune 1620p)')]
+SPEAKERS = [('auto', 'Automatic (the Windows speaker setup)'), ('2', 'Stereo'), ('6', '5.1 surround'), ('8', '7.1 surround')]
 SCALERS = [('fsr1', 'FSR 1 (AMD FidelityFX, sharp)'), ('bilinear', 'Smooth (bilinear)')]
 SHARPENING = [('off', 'Off'), ('1000', 'Low'), ('500', 'Medium'), ('250', 'High'), ('0', 'Maximum')]
 # Temporal anti-aliasing at the games' 1920x1080 (BB_UPSCALER): it takes the scene before the
@@ -158,6 +159,9 @@ TK_KEYS = {'space': 'Space', 'Return': 'Return', 'Escape': 'Escape', 'Tab': 'Tab
            'KP_Insert': 'Keypad 0', 'KP_End': 'Keypad 1', 'KP_Down': 'Keypad 2', 'KP_Next': 'Keypad 3',
            'KP_Left': 'Keypad 4', 'KP_Begin': 'Keypad 5', 'KP_Right': 'Keypad 6', 'KP_Home': 'Keypad 7',
            'KP_Up': 'Keypad 8', 'KP_Prior': 'Keypad 9'}
+# Tk on Windows names numpad keys like the main ones ("8", "plus"), only the keycode tells them apart (#224).
+WIN_NUMPAD = {**{0x60 + n: f'Keypad {n}' for n in range(10)},
+              0x6A: 'Keypad *', 0x6B: 'Keypad +', 0x6D: 'Keypad -', 0x6E: 'Keypad .', 0x6F: 'Keypad /'}
 MOUSE_SENS_MIN, MOUSE_SENS_MAX = 0.1, 10.0  # the Controls page slider (the game's default pace is 1)
 # Insert opens the in-game settings menu; Left Alt frees the mouse cursor.
 RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
@@ -166,7 +170,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'player_name': '',
                 'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'show_fps': False,
                 'window_size': '1920x1080', 'render_resolution': '1920x1080', 'upscale_preset': 'off',
-                'scaler': 'fsr1',
+                'speakers': 'auto', 'scaler': 'fsr1',
                 'sharpening': '500',
                 'anti_aliasing': 'off', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
@@ -376,6 +380,8 @@ def game_environment(s, start=None):
     env['BB_PRESENT_MODE'] = s['present_mode']
     env['BB_VBLANK_HZ'] = str(s.get('frame_rate') or '60')
     env['BB_WINDOW_SIZE'] = str(s.get('window_size') or '1920x1080')
+    if str(s.get('speakers') or 'auto') != 'auto':
+        env['BB_SPEAKERS'] = str(s['speakers'])
     env['BB_RESOLUTION'] = str(s.get('render_resolution') or '1920x1080')
     upscaler = str(s.get('anti_aliasing') or 'off')
     # No upscaler: the games draw at the resolution (a quality has nothing to upscale with).
@@ -1108,6 +1114,11 @@ class Launcher:
                  _('FSR 3 makes one frame (2×). DLSS makes up to three on a GeForce RTX 50 (4×), '
                    'one on an RTX 40.'))
         self.check(f, 'show_fps', _('Show the FPS counter'))
+        self.section(f, _('Audio'))
+        self.row(f, _('Speakers'), self.choice(f, 'speakers', SPEAKERS, 34),
+                 _('What the games are told the speakers are, which sets the choices in their Audio Output '
+                   'menu (stereo, 5.1, 7.1). Automatic follows the Windows speaker configuration of the '
+                   'default playback device; set it to 5.1 or 7.1 when the games only offer stereo.'))
 
     def build_controls(self):
         f = self.page('controls', _('Controls'),
@@ -1245,7 +1256,8 @@ class Launcher:
         if sym in RESERVED_KEYS:
             self.status.configure(text=_(RESERVED_KEYS[sym]), fg=GOLD)
             return 'break'
-        name = TK_KEYS.get(sym)
+        name = WIN_NUMPAD.get(event.keycode) if sys.platform == 'win32' else None
+        name = name or TK_KEYS.get(sym)
         if not name and len(sym) == 1 and sym.isalnum():
             name = sym.upper()
         if not name and sym.startswith('F') and sym[1:].isdigit():

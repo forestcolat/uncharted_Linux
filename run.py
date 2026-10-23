@@ -317,13 +317,22 @@ def main():
     # of chapter 21) from memory it also writes: merging leaves them on the GPU, so it runs with
     # accurate GPU memory (BB_GPU_MERGE=0) unless the player chose otherwise. Uncharted 3 runs the
     # same engine and showed the same floating NPCs (Linux fork), so it does too.
+    # Its aim and turret blur reads tiny render results back (BB_TINY_READBACK, ~13% elsewhere).
     player_merge = env.get('BB_GPU_MERGE')
+    player_tiny = env.get('BB_TINY_READBACK')
+    player_copy = env.get('BB_SCALAR_COPY64_SYNC')
     while True:
         if player_merge is None:
             if exe in (EXECUTABLES['u2'], EXECUTABLES['u3']):
                 env['BB_GPU_MERGE'] = '0'
             else:
                 env.pop('BB_GPU_MERGE', None)
+        if player_tiny is None:
+            env['BB_TINY_READBACK'] = '1' if exe == EXECUTABLES['u2'] else '0'
+        # Its mesh raycaster copies land in guest memory too (iSubMesh after checkpoints).
+        if player_copy is None:
+            env['BB_SCALAR_COPY64_SYNC'] = '2' if exe == EXECUTABLES['u2'] else '0'
+            env['BB_SCALAR_COPY64_DEFER'] = '1' if exe == EXECUTABLES['u2'] else '0'
         game, file = locate(env, exe)
         if not game:
             fail('Set BB_GAME_DIR to the game folder (the one with eboot.bin).')
