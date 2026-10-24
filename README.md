@@ -56,6 +56,11 @@ Once your game folder has been specified: Play, Add to Steam (recommended for St
 - About 8 GB of free RAM
 
 
+## Reporting a bug
+- Open the launcher, go to **Advanced** and click **Copy log for GitHub** (Steam Deck: in Desktop Mode). It copies your system details and the last game log, without your home folder or user name.
+- Open a new issue in the [Issues tab](https://github.com/spacepepperoni/uncharted_Linux/issues/new?template=bug_report.yml), choose **Bug report**, and paste the log into the **Log** field.
+- Say which game and where in it the problem happened.
+
 ## Credits
 
 Built on [bbport](https://github.com/deadinside28/bloodborne_pc), the native Linux port of
