@@ -228,7 +228,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
-                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'show_fps': False,
+                'trophies': True, 'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'show_fps': False,
                 'window_size': '1920x1080', 'render_resolution': '1920x1080', 'upscale_preset': 'off',
                 'render_height': '1080', 'aspect': '16:9', 'speakers': 'auto', 'scaler': 'fsr1',
                 'sharpening': '500',
@@ -571,6 +571,7 @@ def game_environment(s, start=None):
     for key, (_title, _hint, choices) in FIXES.items():
         env.update(choices.get(str(s.get(key) or 'auto'), {}))
     env['BB_BUTTON_PROMPTS'] = str(s.get('button_prompts') or 'auto')
+    env['BB_TROPHIES'] = '1' if s.get('trophies', True) else '0'
     env['BB_CHEATS'] = ','.join(f'{game}:{cheat}' for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')
                                 if s.get(f'{game}_infinite_{cheat}'))
     for item in str(s['extra_env']).split():
@@ -999,7 +1000,8 @@ class Launcher:
         head = tk.Frame(shell, bg=SURFACE)
         head.pack(fill='x', padx=self.px(26), pady=(self.px(18), self.px(14)))
         tk.Label(head, text=title, bg=SURFACE, fg=TEXT, font=self.font_title).pack(anchor='w')
-        tk.Label(head, text=subtitle, bg=SURFACE, fg=MUTED, font=self.font_ui).pack(anchor='w', pady=(2, 0))
+        if subtitle:
+            tk.Label(head, text=subtitle, bg=SURFACE, fg=MUTED, font=self.font_ui).pack(anchor='w', pady=(2, 0))
         # The page body scrolls when it is taller than the window (Display holds many options).
         body = tk.Frame(shell, bg=SURFACE)
         body.pack(fill='both', expand=True)
@@ -1665,9 +1667,9 @@ class Launcher:
     # ---- trophies ----------------------------------------------------------------------------
     def build_trophies(self):
         tk = self.tk
-        f = self.page('trophies', _('Trophies'),
-                      _("The games' own trophy lists. A trophy shows here, and as a notice in the game, "
-                        'when you earn it.'))
+        f = self.page('trophies', _('Trophies'), '')
+        self.check(f, 'trophies', _('Trophies'), _('Earn trophies while you play, with a notice in the game. '
+                                                   'Off: no trophies are earned or shown.'))
         self.trophy_game = self.app.get('trophy_game') if self.app.get('trophy_game') in dict(
             (k, 1) for k, _t, _s, _e in GAMES) else GAMES[0][0]
         self.trophy_filter = 'all'
@@ -1824,8 +1826,8 @@ class Launcher:
 
     def build_cheats(self):
         f = self.page('cheats', _('Cheats'), _('Each cheat only affects its own game; changes apply when the game starts.'))
-        for game, title, subtitle, _exe in GAMES:
-            self.section(f, f'{title} · {subtitle}')
+        for game, title, _subtitle, _exe in GAMES:
+            self.section(f, title)
             self.check(f, f'{game}_infinite_health', _('Infinite Health'))
             self.check(f, f'{game}_infinite_ammo', _('Infinite Ammo'))
 

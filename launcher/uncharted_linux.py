@@ -408,6 +408,10 @@ def apply_defaults(ns):
     """Linux settings the Windows launcher does not have: Steam Deck mode (on by default on
     SteamOS) and a 30 FPS frame rate."""
     ns['APP_DEFAULTS'].setdefault('steam_deck', steam_deck())
+    # No Fixes page: each fix stays automatic (run.py turns it on where it helps), whatever an
+    # earlier version saved for it.
+    for key, (title, hint, _choices) in ns['FIXES'].items():
+        ns['FIXES'][key] = (title, hint, {})
     ns['version_tuple'] = version_key  # the launcher's update check compares with it
     for name in ('WINDOW_SIZES', 'ANTI_ALIASING'):
         ns[name][:] = [(value, text.replace("(the games' own)", '(Default)').replace("(the game's own)", '(Default)'))
@@ -958,7 +962,7 @@ def launcher_class(base, ns):
 
         def nav_pages(self):
             return [('play', _('Library')), ('display', _('Settings')), ('controls', _('Controls')),
-                    ('cheats', _('Cheats')), ('fixes', _('Fixes')), ('trophies', _('Trophies')),
+                    ('cheats', _('Cheats')), ('trophies', _('Trophies')),
                     ('game', _('Files')), ('advanced', _('Advanced'))]
 
         def build_header(self):

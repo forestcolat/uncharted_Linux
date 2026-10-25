@@ -430,7 +430,8 @@ def main():
                 command += ['--patches', str(patches)]
             else:
                 print('Render 720p: not available for this executable; rendering at 1080p')
-        if key and (trophy_dir / 'trophies.txt').is_file():
+        # BB_TROPHIES=0 (the launcher's Trophies switch): no trophies earned or shown.
+        if key and env.get('BB_TROPHIES', '1') != '0' and (trophy_dir / 'trophies.txt').is_file():
             command += ['--trophies', str(trophy_dir)]
         loadexec.unlink(missing_ok=True)
         # No stdin: an inherited pipe (shells such as Git Bash) cost the game its console output.
