@@ -78,8 +78,11 @@ struct Liverpool {
         u64 data;
         u32 num_bytes;
         u64 position;
+        u64 writes_before; ///< BbStats::fence_write_pos when noted (BB_FENCE_SHORTCUT)
     };
     std::deque<PendingFence> pending_fences;
+    void DropWrittenFences();
+    void NotePendingComputeFence(const struct PM4CmdReleaseMem& release_mem);
     void NotePendingFences(const auto& event);
     bool PendingFenceValue(VAddr address, u32& value);
     void NotePendingWrite(const struct PM4CmdWriteData& write_data, u32 num_bytes);
@@ -92,6 +95,10 @@ struct Liverpool {
     /// `dirty` (draw-preparation scanner) records the register blocks written.
     static void ApplyGraphicsRegisterPacket(Regs& regs, const PM4Header* header, u64& checksum,
                                             RegDirty* dirty = nullptr);
+    /// bbport: the effect of a type-3 packet on a queue's compute program state (the SH registers
+    /// 0x200.., which ApplyGraphicsRegisterPacket leaves out): draw-preparation workers replay it
+    /// to know the program a dispatch will run.
+    static void ApplyComputeRegisterPacket(ComputeProgram& cs, const PM4Header* header);
 
 public:
     explicit Liverpool();
@@ -169,6 +176,10 @@ public:
 
     inline ComputeProgram& GetCsRegs() {
         return mapped_queues[curr_qid].cs_state;
+    }
+    /// bbport: the queue being processed (0 = graphics), for diagnostics.
+    [[nodiscard]] s32 CurrentQueueId() const {
+        return curr_qid;
     }
 
     struct AscQueueInfo {

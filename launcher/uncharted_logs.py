@@ -379,6 +379,42 @@ def create_report(data_dir, saves_folder, settings, port_dir, version, crash_sig
     return path
 
 
+ISSUE_URL = 'https://github.com/spacepepperoni/uncharted_Linux/issues/new?template=bug_report.yml'
+ISSUE_CHARS = 60000  # a GitHub issue holds at most 65536 characters
+ISSUE_LOG_HEAD = 60  # lines from the start of the game's log: build, settings, devices
+
+
+def issue_text(data_dir, saves_folder, settings, version, crash_signature):
+    """What Copy log for GitHub puts on the clipboard for the bug report form's Log field: the
+    launcher version, the system, the health check and the last game run's log (its start and
+    as much of its end as fits), without the home folder or user name."""
+    found = health(data_dir, saves_folder, crash_signature)
+    parts = [f'Uncharted launcher {version}, copied {datetime.now():%Y-%m-%d %H:%M:%S}',
+             system_summary(settings),
+             '== Health check\n' + ('\n'.join(f'- {line}' for line in found) or 'No problems found.')]
+    try:
+        lines = private((Path(saves_folder) / 'last_run.log').read_text(
+            encoding='utf-8', errors='replace')).splitlines()
+    except OSError:
+        lines = []
+    parts = [private(part) for part in parts]
+    if not lines:
+        parts.append('== Game log\n(no game run logged yet)')
+        return '\n\n'.join(parts)
+    head = '\n'.join(lines[:ISSUE_LOG_HEAD])
+    room = ISSUE_CHARS - len('\n\n'.join(parts + [head])) - 200
+    tail, used = [], 0
+    for line in reversed(lines[ISSUE_LOG_HEAD:]):
+        if used + len(line) + 1 > room:
+            break
+        tail.append(line)
+        used += len(line) + 1
+    skipped = len(lines) - ISSUE_LOG_HEAD - len(tail)
+    log = head + (f'\n[... {skipped} lines left out ...]' if skipped > 0 else '')
+    parts.append('== Game log (last_run.log)\n' + log + ('\n' + '\n'.join(reversed(tail)) if tail else ''))
+    return '\n\n'.join(parts)
+
+
 def free_space(folder):
     try:
         return f'{shutil.disk_usage(folder).free / (1 << 30):.1f} GB free'

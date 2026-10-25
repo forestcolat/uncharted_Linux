@@ -303,9 +303,6 @@ def steam_command(steam, launcher_file, game):
 
 
 REPO_URL = 'https://github.com/spacepepperoni/uncharted_Linux'
-# Crash reports go to upstream's tracker: the fork has no issues, and most crashes are in the
-# emulation shared with upstream.
-UPSTREAM_ISSUES = 'https://github.com/Supermedo/uncharted_pc/issues'
 
 
 def icon_image(name, size, color, background):
@@ -395,34 +392,6 @@ def crash_signature(log_path):
     return None, text
 
 
-def system_summary():
-    def read(path, key=None):
-        try:
-            for line in Path(path).read_text().splitlines():
-                if key is None or line.startswith(key):
-                    return line.split('=', 1)[-1].split(':', 1)[-1].strip().strip('"')
-        except OSError:
-            pass
-        return '?'
-    return (f"{read('/etc/os-release', 'PRETTY_NAME')}; CPU {read('/proc/cpuinfo', 'model name')}; "
-            f"{'Steam Deck' if steam_deck() else 'PC'}")
-
-
-def crash_report_url(signature, text):
-    """A new-issue link on upstream's tracker with the crash line, the system and the end of the
-    log (GitHub opens it pre-filled; nothing is sent until the player submits it)."""
-    import urllib.parse
-    run = next((line for line in text.splitlines() if line.startswith('Run: ')), 'Run: ?')
-    tail = '\n'.join(text.splitlines()[-45:])[-3500:]
-    body = (f'**Crash:** `{signature[:200]}`\n\n**Build:** Linux fork ({REPO_URL}), not the Windows '
-            f'release\n\n**{run}**\n\n**System:** {system_summary()}\n\n'
-            f'Please attach `last_run.log` from the saves folder (the launcher opened it) and say '
-            f'where in the game it happened.\n\n<details><summary>End of the log</summary>\n\n```\n'
-            f'{tail}\n```\n</details>\n')
-    query = urllib.parse.urlencode({'title': f'Crash (Linux): {signature[:90]}', 'body': body})
-    return f'{UPSTREAM_ISSUES}/new?{query}'
-
-
 def version_key(text):
     """A comparable form of this fork's versions: the upstream version padded to four parts,
     then the Linux build number ('0.4-linux.57' -> (0, 4, 0, 0, 57)). Joining all the digits, as
@@ -439,6 +408,10 @@ def apply_defaults(ns):
     """Linux settings the Windows launcher does not have: Steam Deck mode (on by default on
     SteamOS) and a 30 FPS frame rate."""
     ns['APP_DEFAULTS'].setdefault('steam_deck', steam_deck())
+    # No Fixes page: each fix stays automatic (run.py turns it on where it helps), whatever an
+    # earlier version saved for it.
+    for key, (title, hint, _choices) in ns['FIXES'].items():
+        ns['FIXES'][key] = (title, hint, {})
     ns['version_tuple'] = version_key  # the launcher's update check compares with it
     for name in ('WINDOW_SIZES', 'ANTI_ALIASING'):
         ns[name][:] = [(value, text.replace("(the games' own)", '(Default)').replace("(the game's own)", '(Default)'))
@@ -523,6 +496,7 @@ def deck_environment(settings, env):
     env['BB_PRESENT_MODE'] = 'Fifo'      # gamescope paces FIFO best
     env['BB_FULLSCREEN'] = '1'
     env['BB_FRAME_STATS'] = '1'          # frame time breakdown in last_run.log (tuning the Deck)
+    env['BB_DECK_PROMPTS'] = '1'         # Xbox button pictures with black and white A B X Y
     for key, name in (('anti_aliasing', 'BB_UPSCALER'), ('frame_generation', 'BB_FRAME_GEN'),
                       ('frame_gen_multiplier', 'BB_FRAME_GEN_MULTIPLIER')):
         if not deck_allows(key, str(settings.get(key) or '')):
@@ -988,6 +962,7 @@ def launcher_class(base, ns):
 
         def nav_pages(self):
             return [('play', _('Library')), ('display', _('Settings')), ('controls', _('Controls')),
+                    ('cheats', _('Cheats')), ('trophies', _('Trophies')),
                     ('game', _('Files')), ('advanced', _('Advanced'))]
 
         def build_header(self):
@@ -1143,10 +1118,12 @@ def launcher_class(base, ns):
             extra = self.ttk.Entry(f, textvariable=self.var('extra_env'), width=60)
             self.row(f, _('Environment'), extra, _('Extra variables for the game, NAME=value separated by spaces.'))
             self.section(f, _('Logs and bug reports'))
-            self.note(f, _('Logs of the last 5 launcher and game runs. Create bug report saves them with your '
-                           'system details and settings as one zip file in Downloads, without your home folder or '
-                           'user name; nothing is uploaded. If the launcher window does not work, right-click '
-                           'Uncharted in the application menu and choose Create bug report.'), top=2)
+            self.note(f, _('Something wrong? Copy log for GitHub copies your system details and the last game '
+                           'log, without your home folder or user name. Paste it into a new issue in the Issues '
+                           'tab of the Uncharted Linux port on GitHub. Create bug report saves all logs of the '
+                           'last 5 runs as one zip file in Downloads instead; nothing is uploaded. If the '
+                           'launcher window does not work, right-click Uncharted in the application menu and '
+                           'choose Create bug report.'), top=2)
             card = self.target(f)
             self.health_label = self.ttk.Label(card, text='', style='Muted.TLabel', wraplength=self.px(680),
                                                justify='left')
@@ -1154,7 +1131,8 @@ def launcher_class(base, ns):
             self.show_health()
             holder = self.tk.Frame(card, bg=CARD)
             holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(12, 0))
-            self.pill(holder, _('Create bug report'), self.create_report, kind='primary').pack(side='left')
+            self.pill(holder, _('Copy log for GitHub'), self.copy_for_github, kind='primary').pack(side='left')
+            self.pill(holder, _('Create bug report'), self.create_report).pack(side='left', padx=(8, 0))
             self.pill(holder, _('Show the game log'), lambda: self.show('log')).pack(side='left', padx=(8, 0))
             self.pill(holder, _('Open the logs folder'),
                       lambda: open_path(uncharted_logs.log_dir(ns['DATA_DIR']))).pack(side='left', padx=(8, 0))
@@ -1167,6 +1145,20 @@ def launcher_class(base, ns):
             else:
                 text = _('No problems found in the recent logs.')
             self.health_label.configure(text=text, foreground=GOLD if found else MUTED)
+
+        def copy_for_github(self, intro=''):
+            """The log for the bug report form on the clipboard, then the form opened."""
+            self.collect()
+            text = uncharted_logs.issue_text(ns['DATA_DIR'], self.saves_folder(), self.app, ns['VERSION'],
+                                             crash_signature)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.root.update()  # hand the clipboard over now, not when the dialog closes
+            if self.messagebox.askyesno(NAME, intro + _('Your log is copied.\n\nOpen the Issues tab of the Uncharted '
+                                                        'Linux port on GitHub now? Fill in the form and paste the log '
+                                                        'into its Log field (Ctrl+V). Keep this launcher open until '
+                                                        'you have pasted it.')):
+                open_path(uncharted_logs.ISSUE_URL)
 
         def create_report(self):
             self.collect()
@@ -1380,12 +1372,8 @@ def launcher_class(base, ns):
                 return
             self.app['reported_crash'] = key  # asked once per crashed run, whatever the answer
             self.collect()
-            if self.messagebox.askyesno(NAME, _('Uncharted stopped with:\n\n{}\n\nOpen a crash report on the Uncharted port\'s GitHub? '
-                                                'Your system details and the end of the log are filled in; nothing '
-                                                'is sent until you submit it. Please check its open issues for the '
-                                                'same crash first.').format(signature[:160])):
-                open_path(crash_report_url(signature, text))
-                open_path(self.saves_folder())
+            self.copy_for_github(_('Uncharted stopped with:\n\n{}\n\nPlease check the open issues for the same '
+                                   'crash first; nothing is sent until you submit the form.\n\n').format(signature[:160]))
 
         def saves_autofill(self):
             # Choosing a game folder fills in <folder>/Saves, unless the player chose a saves
