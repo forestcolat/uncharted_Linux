@@ -468,6 +468,27 @@ void VideoOutDriver::Flip(const Request& req) {
                         BbStats::tick_wait_ns.exchange(0) / (window * 1e7),
                         frames ? double(BbStats::reduced_draws.exchange(0)) / frames : 0.0,
                         frames ? double(BbStats::scene_draws.exchange(0)) / frames : 0.0);
+            // Command queues waiting on memory, as a share of the window (GPU command thread).
+            const u64 gfx_waits = BbStats::gfx_waits.exchange(0);
+            const u64 asc_waits = BbStats::asc_waits.exchange(0);
+            double fence_share[BbStats::FenceKinds];
+            for (u32 kind = 0; kind < BbStats::FenceKinds; ++kind) {
+                fence_share[kind] = BbStats::gfx_fence_wait_ns[kind].exchange(0) / (window * 1e7);
+                BbStats::gfx_fence_waits[kind].exchange(0);
+            }
+            std::printf("Queue waits: graphics %.1f%% (%.0f/frame; ended by end-of-pipe fences %.1f%%, "
+                        "end-of-shader %.1f%%, WriteData %.1f%%, compute fences %.1f%%), compute %.1f%% "
+                        "(%.0f/frame); all queues waiting %.1f%%; longest %.2f ms at "
+                        "0x%llx\n",
+                        BbStats::gfx_wait_ns.exchange(0) / (window * 1e7),
+                        frames ? double(gfx_waits) / frames : 0.0, fence_share[BbStats::FenceEop],
+                        fence_share[BbStats::FenceEos], fence_share[BbStats::FenceWriteData],
+                        fence_share[BbStats::FenceCompute],
+                        BbStats::asc_wait_ns.exchange(0) / (window * 1e7),
+                        frames ? double(asc_waits) / frames : 0.0,
+                        BbStats::queue_spin_ns.exchange(0) / (window * 1e7),
+                        BbStats::longest_wait_ns.exchange(0) / 1e6,
+                        static_cast<unsigned long long>(BbStats::longest_wait_addr.exchange(0)));
             // Frame pacing: spread of the guest flip intervals (judder that the mean hides).
             if (intervals.size() > 2) {
                 std::vector<double> sorted = intervals;
